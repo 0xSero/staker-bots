@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import { BaseExecutor } from './strategies/BaseExecutor';
 import { RelayerExecutor } from './strategies/RelayerExecutor';
-import { ConsoleLogger, Logger } from '@modules/monitor/logging';
+import { ConsoleLogger, Logger } from '../../modules/monitor/logging';
 import {
   ExecutorConfig,
   QueuedTransaction,
@@ -13,9 +13,9 @@ import {
   DEFAULT_EXECUTOR_CONFIG,
   DEFAULT_RELAYER_EXECUTOR_CONFIG,
 } from './constants';
-import { GovLstProfitabilityCheck } from '@modules/profitability';
+import { GovLstProfitabilityCheck } from '../../modules/profitability';
 import { IExecutor } from './interfaces/IExecutor';
-import { DatabaseWrapper } from '@modules/database';
+import { DatabaseWrapper } from '../../modules/database';
 import { ExecutorError } from './errors';
 
 /**

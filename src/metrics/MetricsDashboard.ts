@@ -1,7 +1,7 @@
 import { createBullBoard } from '@bull-board/api'
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter'
 import { ExpressAdapter } from '@bull-board/express'
-import express from 'express'
+import express, { Handler } from 'express'
 import { Queue } from 'bullmq'
 import { Logger } from '../shared/Logger'
 
@@ -49,25 +49,32 @@ export class MetricsDashboard {
     const app = express()
 
     // Basic authentication middleware
-    app.use(this.config.basePath, (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    app.use(this.config.basePath, (req, res, next) => {
       const authHeader = req.headers.authorization
       if (!authHeader) {
         res.setHeader('WWW-Authenticate', 'Basic')
-        return res.status(401).send('Authentication required')
+        res.status(401).send('Authentication required')
+        return
       }
 
-      const auth = Buffer.from(authHeader.split(' ')[1], 'base64')
+      const [, base64Credentials] = authHeader.split(' ')
+      if (!base64Credentials) {
+        res.setHeader('WWW-Authenticate', 'Basic')
+        res.status(401).send('Invalid authorization format')
+        return
+      }
+
+      const [username, password] = Buffer.from(base64Credentials, 'base64')
         .toString()
         .split(':')
-      const username = auth[0]
-      const password = auth[1]
 
       if (username === this.config.username && password === this.config.password) {
         next()
-      } else {
-        res.setHeader('WWW-Authenticate', 'Basic')
-        return res.status(401).send('Invalid credentials')
+        return
       }
+
+      res.setHeader('WWW-Authenticate', 'Basic')
+      res.status(401).send('Invalid credentials')
     })
 
     app.use(this.config.basePath, serverAdapter.getRouter())

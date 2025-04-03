@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestFactory, waitForCondition } from '../helpers'
-import { Queue, JobsOptions } from 'bullmq'
+import { Queue } from 'bullmq'
 import { z } from 'zod'
 
 // Define test job schemas

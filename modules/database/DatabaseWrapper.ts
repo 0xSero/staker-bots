@@ -154,8 +154,8 @@ export class DatabaseWrapper implements IDatabase {
       if (this.usingFallback) {
         // Already using fallback, call the equivalent method on fallbackDb
         const fallbackDb = this.getFallbackDb();
-        const methodName = fn.name;
-        return fallbackDb[methodName](...args);
+        const method = fallbackDb[fn.name as keyof JsonDatabase] as unknown as (...args: Args) => Promise<Return>;
+        return method(...args);
       }
 
       try {
@@ -176,8 +176,8 @@ export class DatabaseWrapper implements IDatabase {
           }
 
           const fallbackDb = this.getFallbackDb();
-          const methodName = fn.name;
-          return fallbackDb[methodName](...args);
+          const method = fallbackDb[fn.name as keyof JsonDatabase] as unknown as (...args: Args) => Promise<Return>;
+          return method(...args);
         }
         throw error;
       }

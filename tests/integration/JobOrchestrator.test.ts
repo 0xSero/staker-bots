@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestFactory, waitForCondition, waitForQueueEmpty } from '../helpers'
 import { JobOrchestrator } from '../../src/orchestrator'
 import { Queue, QueueEvents, JobsOptions } from 'bullmq'
-import type { Job } from 'bullmq'
 
 interface TestJobData {
   type?: string

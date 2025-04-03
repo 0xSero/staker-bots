@@ -4,6 +4,7 @@ import { QUEUE_NAMES } from '@/lib/queue-definitions'
 import { EventProcessingJob, EventProcessingJobData, EventProcessingJobResult, EVENT_PROCESSING_JOB_OPTIONS } from '../types/event-processing'
 import { WorkerMetrics, WorkerMetricsData } from '../utils/metrics'
 import { ProfitabilityJobData } from '../types/profitability'
+import { IDatabase } from 'modules/database'
 
 function isContractEvent(event: Log): event is ethers.EventLog {
   return 'fragment' in event && event.fragment !== undefined
@@ -17,6 +18,7 @@ export interface MonitorWorkerConfig {
   concurrency?: number
   blockConfirmations?: number
   profitabilityQueue?: Queue<ProfitabilityJobData>
+  database: IDatabase
 }
 
 export class MonitorWorker {
@@ -28,6 +30,7 @@ export class MonitorWorker {
   private isRunning: boolean = false
   private lastProcessedBlock: number = 0
   private readonly profitabilityQueue?: Queue<ProfitabilityJobData>
+  private readonly db: IDatabase
 
   constructor(private readonly config: MonitorWorkerConfig) {
     this.metrics = new WorkerMetrics('monitor-worker')
@@ -37,6 +40,14 @@ export class MonitorWorker {
       config.provider
     )
     this.profitabilityQueue = config.profitabilityQueue
+    this.db = config.database
+
+    // Initialize lastProcessedBlock from START_BLOCK environment variable
+    const startBlock = parseInt(process.env.START_BLOCK || '0', 10);
+    if (startBlock > 0) {
+      this.lastProcessedBlock = startBlock - 1; // Subtract 1 so we start FROM the startBlock
+      console.log(`Initializing monitor to start from block ${startBlock}`);
+    }
 
     // Create queue for event processing
     this.eventQueue = new Queue<EventProcessingJobData, EventProcessingJobResult>(
@@ -95,11 +106,38 @@ export class MonitorWorker {
     const startTime = Date.now()
 
     try {
-      const { eventType, blockNumber, eventData } = job.data
+      const { eventType, blockNumber, eventData, transactionHash } = job.data
+
+      // Skip processing for unknown events but still mark as success
+      if (eventType === 'unknown') {
+        return {
+          success: true,
+          processedAt: Date.now(),
+          blockNumber,
+          eventType,
+          message: 'Skipped unknown event type'
+        }
+      }
+
+      // Create database entry for the event
+      const dbEntry = {
+        deposit_id: eventData.depositId?.toString(),
+        owner_address: eventData.owner || eventData._owner,
+        depositor_address: eventData.depositor || eventData._depositor || eventData.owner || eventData._owner,
+        delegatee_address: eventData.delegatee || eventData._delegatee || eventData.newDelegatee,
+        amount: eventData.amount?.toString() || '0',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }
 
       // Process the event based on its type
       switch (eventType) {
         case 'StakeDeposited': {
+          // Save to database first
+          if (typeof this.db?.createDeposit === 'function') {
+            await this.db.createDeposit(dbEntry)
+          }
+
           // Queue deposit for profitability check
           if (this.profitabilityQueue) {
             await this.profitabilityQueue.add('check-profitability', {
@@ -114,11 +152,23 @@ export class MonitorWorker {
               }],
               batchId: `deposit-${eventData.depositId}-${blockNumber}`,
               timestamp: Date.now()
+            }, {
+              // Add job options for visibility
+              removeOnComplete: false,
+              removeOnFail: false
             })
           }
           break
         }
         case 'StakeWithdrawn': {
+          // Update database
+          if (typeof this.db?.updateDeposit === 'function') {
+            await this.db.updateDeposit(eventData.depositId.toString(), {
+              amount: '0',
+              updated_at: new Date().toISOString()
+            })
+          }
+
           // Handle stake withdrawal by checking if we need to recheck profitability
           // for any remaining deposits from the same owner
           if (this.profitabilityQueue) {
@@ -152,6 +202,14 @@ export class MonitorWorker {
           break
         }
         case 'DelegateeAltered': {
+          // Update database
+          if (typeof this.db?.updateDeposit === 'function') {
+            await this.db.updateDeposit(eventData.depositId.toString(), {
+              delegatee_address: eventData.newDelegatee,
+              updated_at: new Date().toISOString()
+            })
+          }
+
           // Queue deposit for profitability check after delegatee change
           if (this.profitabilityQueue) {
             if (typeof this.contract.deposits !== 'function') {
@@ -271,7 +329,24 @@ export class MonitorWorker {
           break
         }
         default:
-          throw new Error(`Unknown event type: ${eventType}`)
+          console.log(`Unhandled event type: ${eventType}`)
+          return {
+            success: true,
+            processedAt: Date.now(),
+            blockNumber,
+            eventType,
+            message: `Unhandled event type: ${eventType}`
+          }
+      }
+
+      // Update checkpoint after successful processing
+      if (typeof this.db?.updateCheckpoint === 'function') {
+        await this.db.updateCheckpoint({
+          component_type: 'monitor',
+          last_block_number: blockNumber,
+          block_hash: transactionHash,
+          last_update: new Date().toISOString()
+        })
       }
 
       return {
@@ -281,6 +356,7 @@ export class MonitorWorker {
         eventType
       }
     } catch (error) {
+      console.error('Error processing event:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -308,20 +384,31 @@ export class MonitorWorker {
   }
 
   private async startEventPolling(): Promise<void> {
+    // Get the configured max block range from environment or config
+    let maxBlockRange = parseInt(process.env.MONITOR_MAX_BLOCK_RANGE || '500', 10);
+    console.log(`Starting event polling with max block range: ${maxBlockRange}`);
+
     while (this.isRunning) {
       try {
-        const currentBlock = await this.config.provider.getBlockNumber()
-        const confirmedBlock = currentBlock - (this.config.blockConfirmations || 1)
+        const currentBlock = await this.config.provider.getBlockNumber();
+        const confirmedBlock = currentBlock - (this.config.blockConfirmations || 1);
 
         if (confirmedBlock <= this.lastProcessedBlock) {
-          await new Promise(resolve => setTimeout(resolve, 1000))
-          continue
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
         }
 
-        const fromBlock = this.lastProcessedBlock + 1
-        const toBlock = confirmedBlock
+        const fromBlock = this.lastProcessedBlock + 1;
 
-        const events = await this.contract.queryFilter('*', fromBlock, toBlock)
+        // Calculate the range, but don't exceed max range
+        const blockDifference = confirmedBlock - fromBlock + 1;
+        const blockRange = Math.min(blockDifference, maxBlockRange);
+        const toBlock = fromBlock + blockRange - 1;
+
+        console.log(`Querying blocks ${fromBlock} to ${toBlock} (range: ${blockRange})`);
+
+        const events = await this.contract.queryFilter('*', fromBlock, toBlock);
+        console.log(`Found ${events.length} events in block range ${fromBlock}-${toBlock}`);
 
         // Group deposits by block for batch profitability checks
         const depositsByBlock = new Map<number, Array<{
@@ -332,10 +419,10 @@ export class MonitorWorker {
           amount: string
           createdAt: string
           updatedAt: string
-        }>>()
+        }>>();
 
         for (const event of events) {
-          const eventType = isContractEvent(event) ? event.fragment.name : 'unknown'
+          const eventType = isContractEvent(event) ? event.fragment.name : 'unknown';
 
           // Add event to processing queue
           await this.eventQueue.add(
@@ -347,11 +434,11 @@ export class MonitorWorker {
               eventData: isContractEvent(event) ? event.args || {} : {},
               timestamp: Date.now()
             }
-          )
+          );
 
           // Group deposits for batch profitability checks
           if (eventType === 'StakeDeposited' && isContractEvent(event)) {
-            const blockDeposits = depositsByBlock.get(event.blockNumber!) || []
+            const blockDeposits = depositsByBlock.get(event.blockNumber!) || [];
             blockDeposits.push({
               id: event.args.depositId.toString(),
               owner: event.args.owner,
@@ -360,8 +447,8 @@ export class MonitorWorker {
               amount: event.args.amount.toString(),
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString()
-            })
-            depositsByBlock.set(event.blockNumber!, blockDeposits)
+            });
+            depositsByBlock.set(event.blockNumber!, blockDeposits);
           }
         }
 
@@ -372,14 +459,23 @@ export class MonitorWorker {
               deposits,
               batchId: `block-${blockNumber}`,
               timestamp: Date.now()
-            })
+            });
           }
         }
 
-        this.lastProcessedBlock = toBlock
+        this.lastProcessedBlock = toBlock;
+
+        // If successful, we can gradually increase the range up to our configured max
+        const configuredMax = parseInt(process.env.MONITOR_MAX_BLOCK_RANGE || '500', 10);
+        maxBlockRange = Math.min(Math.floor(maxBlockRange * 1.1), configuredMax);
       } catch (error) {
-        console.error('Error in event polling:', error)
-        await new Promise(resolve => setTimeout(resolve, 5000))
+        console.error('Error in event polling:', error);
+
+        // Reduce block range on error, but don't go below 10 blocks
+        maxBlockRange = Math.max(Math.floor(maxBlockRange / 2), 10);
+        console.log(`Reduced block range to ${maxBlockRange} due to error`);
+
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
   }

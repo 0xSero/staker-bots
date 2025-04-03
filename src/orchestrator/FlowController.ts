@@ -58,7 +58,7 @@ export class FlowController {
 
     try {
       const jobCounts = await queue.getJobCounts()
-      const totalJobs = jobCounts.waiting + jobCounts.active
+      const totalJobs = (jobCounts.waiting ?? 0) + (jobCounts.active ?? 0)
 
       if (totalJobs > this.config.backpressureThreshold) {
         await queue.pause()
@@ -70,7 +70,7 @@ export class FlowController {
         // Resume queue when job count drops below threshold
         const checkAndResume = async () => {
           const currentCounts = await queue.getJobCounts()
-          const currentTotal = currentCounts.waiting + currentCounts.active
+          const currentTotal = (currentCounts.waiting ?? 0) + (currentCounts.active ?? 0)
 
           if (currentTotal <= this.config.backpressureThreshold) {
             await queue.resume()

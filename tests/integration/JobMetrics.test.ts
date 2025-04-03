@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestFactory, waitForCondition } from '../helpers'
-import { Queue, QueueEvents, JobsOptions } from 'bullmq'
-import type { Job } from 'bullmq'
+import { Queue, JobsOptions } from 'bullmq'
 
 interface MetricsJobData {
   data: string

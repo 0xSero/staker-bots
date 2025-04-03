@@ -18,7 +18,7 @@ export const PRODUCTION_CONFIG = {
   },
   monitor: {
     confirmations: 12,
-    maxBlockRange: 5000,
+    maxBlockRange: 2000,
     pollInterval: 13, // seconds
     healthCheckInterval: 60, // 1 minute
     maxReorgDepth: 100

@@ -1,0 +1,32 @@
+import { govlst } from 'modules/constants'
+
+// Use the staker ABI from the test files
+export const stakerAbi = [
+  "function STAKER() external view returns (address)",
+  "function payoutAmount() external view returns (uint256)",
+  "function claimAndDistributeReward(address tipReceiver, uint256 minTotalRewards, uint256[] calldata depositIds) external returns (uint256)",
+  "function sharesOf(address account) external view returns (uint256)",
+  "function deposits(uint256 depositId) external view returns (address owner, uint256 balance, uint256 earningPower, address delegatee, address claimer)",
+  "function unclaimedReward(uint256 depositId) external view returns (uint256)",
+  "function claimReward(uint256 depositId) external returns (uint256)",
+  "function bump(uint256 depositId, uint256 tip, address tipReceiver) external returns (uint256)",
+  "function totalSupply() external view returns (uint256)",
+  "function symbol() external view returns (string)",
+  "function balanceOf(address account) external view returns (uint256)",
+  "function transfer(address recipient, uint256 amount) external returns (bool)",
+  "function transferFrom(address sender, address recipient, uint256 amount) external returns (bool)",
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "event StakeDeposited(address indexed owner, uint256 indexed depositId, uint256 amount)",
+  "event StakeWithdrawn(address indexed owner, uint256 indexed depositId, uint256 amount)",
+  "event DelegateeAltered(address indexed delegator, address indexed delegatee, uint256 depositId)",
+  "event ClaimerAltered(address indexed owner, address indexed claimer, uint256 depositId)"
+]
+
+// Export the GovLst ABI from constants
+export const govLstAbi = govlst
+
+// Export both ABIs for use in config
+export default {
+  stakerAbi,
+  govLstAbi
+}

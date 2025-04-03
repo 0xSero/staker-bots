@@ -11,6 +11,7 @@ export interface QueueFactoryOptions {
     }
     removeOnComplete?: boolean | number
     removeOnFail?: boolean | number
+    delay?: number
   }
 }
 
@@ -44,10 +45,12 @@ export class QueueFactory {
         attempts: 3,
         backoff: {
           type: 'exponential',
-          delay: 1000
+          delay: 5000 // Increased from 1000 to 5000ms
         },
-        removeOnComplete: 1000, // Keep last 1000 completed jobs
-        removeOnFail: false // Keep failed jobs for debugging
+        removeOnComplete: 1000,
+        removeOnFail: false,
+        // Add delay between jobs
+        delay: 1000, // 1 second delay between jobs
       },
       ...options
     }
@@ -63,16 +66,75 @@ export class QueueFactory {
       return existingQueue
     }
 
+    const queueSpecificOptions = this.getQueueSpecificOptions(name)
+
     const queueOptions: QueueOptions = {
       connection: this.connectionManager.getBullMQConnection(),
       prefix: this.defaultOptions.prefix,
-      defaultJobOptions: this.defaultOptions.defaultJobOptions,
+      defaultJobOptions: {
+        ...this.defaultOptions.defaultJobOptions,
+        ...queueSpecificOptions.defaultJobOptions
+      },
       ...options
     }
 
     const queue = new Queue(name, queueOptions)
     this.queues.set(name, queue)
     return queue
+  }
+
+  private getQueueSpecificOptions(queueName: string): any {
+    const baseOptions = {
+      limiter: {
+        max: 5, // Default max jobs per interval
+        duration: 5000 // Default interval (5 seconds)
+      }
+    }
+
+    switch (queueName) {
+      case 'event-processing':
+        return {
+          limiter: {
+            max: 10,
+            duration: 15000 // 15 seconds interval
+          },
+          defaultJobOptions: {
+            delay: 2000 // 2 second delay between event processing
+          }
+        }
+      case 'reward-check':
+        return {
+          limiter: {
+            max: 1,
+            duration: 300000 // 5 minutes interval (matching original)
+          },
+          defaultJobOptions: {
+            delay: 5000 // 5 second delay between reward checks
+          }
+        }
+      case 'profitability-analysis':
+        return {
+          limiter: {
+            max: 3,
+            duration: 10000 // 10 seconds interval
+          },
+          defaultJobOptions: {
+            delay: 3000 // 3 second delay
+          }
+        }
+      case 'transaction-execution':
+        return {
+          limiter: {
+            max: 1,
+            duration: 10000 // 10 seconds interval
+          },
+          defaultJobOptions: {
+            delay: 5000 // 5 second delay
+          }
+        }
+      default:
+        return baseOptions
+    }
   }
 
   public createWorker(
@@ -85,9 +147,12 @@ export class QueueFactory {
       return existingWorker
     }
 
+    const queueSpecificOptions = this.getQueueSpecificOptions(queueName)
+
     const workerOptions: WorkerOptions = {
       connection: this.connectionManager.getBullMQConnection(),
       prefix: this.defaultOptions.prefix,
+      limiter: queueSpecificOptions.limiter,
       ...options
     }
 

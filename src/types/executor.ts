@@ -1,6 +1,5 @@
 import { Job, Queue, ConnectionOptions } from 'bullmq'
 import { ethers } from 'ethers'
-import { ProfitabilityResult } from './profitability'
 import { TransactionType } from './transactions'
 
 export interface ExecutorJobData {

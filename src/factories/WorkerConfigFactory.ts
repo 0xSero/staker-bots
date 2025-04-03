@@ -25,7 +25,9 @@ export class WorkerConfigFactory {
     return {
       connection: this.connection,
       databaseConfig: config,
-      concurrency: 5
+      concurrency: 2,
+      stalledInterval: 30000,
+      maxStalledCount: 3
     }
   }
 
@@ -37,10 +39,13 @@ export class WorkerConfigFactory {
       contractAbi: this.contractAbi,
       logger: this.logger,
       databaseQueue: this.queues[QUEUE_NAMES.DATABASE_OPERATIONS],
+      database: this.databaseWrapper,
       concurrency: 1,
-      pollingInterval: 15000, // 15 seconds
-      maxBlockRange: 2000,
-      confirmations: 3
+      pollingInterval: 15000,
+      maxBlockRange: 500,
+      confirmations: 3,
+      stalledInterval: 30000,
+      maxStalledCount: 3
     }
   }
 
@@ -64,6 +69,8 @@ export class WorkerConfigFactory {
       gasLimitMultiplier: 1.1,
       retryIntervalMs: 15000,
       maxRetries: 3,
+      stalledInterval: 60000,
+      maxStalledCount: 2,
       logger: this.logger
     }
   }
@@ -80,9 +87,11 @@ export class WorkerConfigFactory {
       minProfitMargin: ethers.parseEther('0.01').toString(),
       gasPriceBuffer: '20',
       maxBatchSize: 50,
-      concurrency: 3,
+      concurrency: 2,
       tipReceiver: process.env.TIP_RECEIVER || ethers.ZeroAddress,
-      priceFeedCacheDuration: 300000 // 5 minutes
+      priceFeedCacheDuration: 300000,
+      stalledInterval: 30000,
+      maxStalledCount: 3
     }
   }
 
@@ -107,10 +116,12 @@ export class WorkerConfigFactory {
       contractAbi: this.contractAbi,
       profitabilityQueue: this.queues[QUEUE_NAMES.PROFITABILITY_ANALYSIS],
       logger: this.logger,
-      concurrency: 3,
+      concurrency: 1,
       batchSize: 50,
       retryDelayMs: 15000,
-      maxRetries: 3
+      maxRetries: 3,
+      stalledInterval: 30000,
+      maxStalledCount: 3
     }
   }
 }

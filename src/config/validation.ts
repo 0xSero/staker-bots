@@ -3,37 +3,50 @@ import { OrchestratorConfig } from '../orchestrator/types'
 import { FlowControlConfig } from '../orchestrator/FlowController'
 import { HealthCheckConfig } from '../orchestrator/HealthMonitor'
 
+const createNumberSchema = (min: number) =>
+  z.union([
+    z.string().transform((val) => Number(val)),
+    z.number()
+  ]).refine((val) => {
+    console.log(`Validating value ${val} against min ${min}`)
+    return !isNaN(val) && val >= min
+  }, {
+    message: `Number must be greater than or equal to ${min}`
+  })
+
 const orchestratorConfigSchema = z.object({
-  maxConcurrentJobs: z.number().min(1),
-  healthCheckInterval: z.number().min(1000),
-  circuitBreakerThreshold: z.number().min(1),
-  recoveryTimeout: z.number().min(1000)
+  maxConcurrentJobs: createNumberSchema(1),
+  healthCheckInterval: createNumberSchema(1000),
+  circuitBreakerThreshold: createNumberSchema(1),
+  recoveryTimeout: createNumberSchema(1000)
 })
 
 const flowControlConfigSchema = z.object({
   defaultRateLimit: z.object({
-    maxTokens: z.number().min(1),
-    refillRate: z.number().min(1)
+    maxTokens: createNumberSchema(1),
+    refillRate: createNumberSchema(1)
   }),
   queueSpecificLimits: z.record(z.object({
-    maxTokens: z.number().min(1),
-    refillRate: z.number().min(1)
+    maxTokens: createNumberSchema(1),
+    refillRate: createNumberSchema(1)
   })).optional(),
-  maxConcurrentJobs: z.number().min(1),
-  backpressureThreshold: z.number().min(1)
+  maxConcurrentJobs: createNumberSchema(1),
+  backpressureThreshold: createNumberSchema(1)
 })
 
 const healthCheckConfigSchema = z.object({
-  checkInterval: z.number().min(1000),
-  unhealthyThreshold: z.number().min(1),
-  recoveryThreshold: z.number().min(1)
+  checkInterval: createNumberSchema(1000),
+  unhealthyThreshold: createNumberSchema(1),
+  recoveryThreshold: createNumberSchema(1)
 })
 
 export function validateOrchestratorConfig(config: OrchestratorConfig): void {
+  console.log('Validating orchestrator config:', config)
   try {
     orchestratorConfigSchema.parse(config)
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('Validation errors:', error.errors)
       throw new Error(`Invalid orchestrator configuration: ${error.errors.map(e => e.message).join(', ')}`)
     }
     throw error
@@ -41,10 +54,12 @@ export function validateOrchestratorConfig(config: OrchestratorConfig): void {
 }
 
 export function validateFlowControlConfig(config: FlowControlConfig): void {
+  console.log('Validating flow control config:', config)
   try {
     flowControlConfigSchema.parse(config)
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('Validation errors:', error.errors)
       throw new Error(`Invalid flow control configuration: ${error.errors.map(e => e.message).join(', ')}`)
     }
     throw error
@@ -52,10 +67,12 @@ export function validateFlowControlConfig(config: FlowControlConfig): void {
 }
 
 export function validateHealthCheckConfig(config: HealthCheckConfig): void {
+  console.log('Validating health check config:', config)
   try {
     healthCheckConfigSchema.parse(config)
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('Validation errors:', error.errors)
       throw new Error(`Invalid health check configuration: ${error.errors.map(e => e.message).join(', ')}`)
     }
     throw error

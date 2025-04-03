@@ -1,12 +1,14 @@
 import { Queue } from 'bullmq'
-import { Logger } from '../types/logger'
+import { Logger } from '../shared/Logger'
 import { JobOrchestrator, FlowController, HealthMonitor } from '@/orchestrator'
 import { ApplicationConfig } from '../config/index'
 import { redisConfig } from '@/config/redis'
+import { MetricsDashboard } from '@/metrics/MetricsDashboard'
 
 export class ComponentFactory {
   private queues: Record<string, Queue> = {}
   private components: Map<string, any> = new Map()
+  private dashboard: MetricsDashboard | null = null
 
   constructor(
     private config: ApplicationConfig,
@@ -18,6 +20,13 @@ export class ComponentFactory {
     await this.createQueues()
     await this.createComponents()
     await this.setupDependencies()
+    await this.initializeDashboard()
+
+    // Add test jobs if BULL_BOARD is true
+    if (process.env.BULL_BOARD === 'true') {
+      await this.addTestJobs()
+    }
+
     this.logger.info('Components initialized successfully')
   }
 
@@ -31,6 +40,11 @@ export class ComponentFactory {
     await flowController.start()
     healthMonitor.start()
 
+    // Start dashboard if enabled
+    if (process.env.BULL_BOARD === 'true' && this.dashboard) {
+      await this.dashboard.start()
+    }
+
     this.logger.info('Components started successfully')
   }
 
@@ -43,6 +57,11 @@ export class ComponentFactory {
     await orchestrator.stop()
     await flowController.stop()
     healthMonitor.stop()
+
+    // Stop dashboard if running
+    if (this.dashboard) {
+      await this.dashboard.stop()
+    }
 
     // Close queues
     await Promise.all(Object.values(this.queues).map(queue => queue.close()))
@@ -143,5 +162,40 @@ export class ComponentFactory {
     }
 
     this.logger.info('Set up queue dependencies')
+  }
+
+  private async initializeDashboard(): Promise<void> {
+    if (process.env.BULL_BOARD === 'true') {
+      this.dashboard = MetricsDashboard.getInstance({
+        port: parseInt(process.env.BULL_BOARD_PORT || '3000', 10),
+        basePath: process.env.BULL_BOARD_BASE_PATH || '/',
+        username: process.env.BULL_BOARD_USERNAME || 'admin',
+        password: process.env.BULL_BOARD_PASSWORD || 'admin'
+      })
+
+      // Register all queues with the dashboard
+      Object.values(this.queues).forEach(queue => {
+        this.dashboard?.registerQueue(queue)
+      })
+
+      this.logger.info('Metrics dashboard initialized')
+    }
+  }
+
+  private async addTestJobs(): Promise<void> {
+    // Add a test job to each queue
+    for (const [queueName, queue] of Object.entries(this.queues)) {
+      await queue.add('test-job', {
+        message: `Test job for ${queueName} queue`,
+        timestamp: new Date().toISOString()
+      }, {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1000
+        }
+      })
+      this.logger.info('Added test job', { queue: queueName })
+    }
   }
 }

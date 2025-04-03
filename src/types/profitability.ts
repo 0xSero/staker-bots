@@ -1,6 +1,5 @@
 import { Job, Queue, ConnectionOptions } from 'bullmq'
 import { ethers } from 'ethers'
-import { RewardData } from './reward-check'
 
 export interface Deposit {
   id: string

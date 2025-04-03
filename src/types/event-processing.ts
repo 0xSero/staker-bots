@@ -14,6 +14,7 @@ export interface EventProcessingJobResult {
   processedAt: number
   blockNumber: number
   eventType: string
+  message?: string
 }
 
 export type EventProcessingJob = Job<EventProcessingJobData, EventProcessingJobResult>

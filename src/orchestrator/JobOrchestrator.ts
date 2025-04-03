@@ -123,7 +123,7 @@ export class JobOrchestrator extends EventEmitter {
         queueName: dependency.sourceQueue,
         handler: async (jobId: string, result: any) => {
           if (!dependency.condition || dependency.condition(result)) {
-            await this.queues[dependency.targetQueue].add(
+            await this.queues[dependency.targetQueue]?.add(
               `${dependency.sourceQueue}-${jobId}`,
               result
             )
@@ -204,7 +204,7 @@ export class JobOrchestrator extends EventEmitter {
 
         if (isPaused) {
           this.updateComponentHealth(queueName, 'degraded', new Error('Queue is paused'))
-        } else if (jobCounts.failed > this.config.circuitBreakerThreshold) {
+        } else if (jobCounts.failed && jobCounts.failed > this.config.circuitBreakerThreshold) {
           this.updateComponentHealth(queueName, 'unhealthy', new Error('Too many failed jobs'))
         } else {
           this.updateComponentHealth(queueName, 'healthy')
