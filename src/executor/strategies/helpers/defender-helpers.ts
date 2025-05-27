@@ -37,7 +37,7 @@ type FlashbotsResponse = {
 };
 
 interface RelayerListOptions {
-  status: 'pending' | 'sent' | 'submitted' | 'mined' | 'confirmed' | 'failed';
+  status: 'pending' | 'mined' | 'failed' | 'expired';
   limit: number;
   sort?: 'asc' | 'desc';
 }
@@ -67,11 +67,16 @@ export async function handlePendingRelayerTransactions(
 
   try {
     // Retrieve the latest pending transactions (newest first, max 50 to stay well under rate-limits)
-    const pending = await defenderClient.relaySigner.list({
+    const pendingResponse = await defenderClient.relaySigner.listTransactions({
       status: 'pending',
       limit: 50,
       sort: 'desc',
     } as RelayerListOptions);
+
+    // Handle both array and paginated response types
+    const pending = Array.isArray(pendingResponse) 
+      ? pendingResponse 
+      : (pendingResponse as any).items || [];
 
     if (!pending || pending.length === 0) return false;
 
@@ -140,19 +145,20 @@ export async function cleanupStaleTransactions(
     // First, get all pending transactions from Defender
     const pendingDefenderTxs = defenderClient
       ? await defenderClient.relaySigner
-          .list({
+          .listTransactions({
             status: 'pending',
             limit: 50,
             sort: 'asc', // Get oldest first
           } as RelayerListOptions)
-          .then((txs: RelayerTransactionResponse[]) =>
-            txs.map((tx) => ({
+          .then((response: any) => {
+            const txs = Array.isArray(response) ? response : (response.items || []);
+            return txs.map((tx: RelayerTransactionResponse) => ({
               nonce: Number(tx.nonce),
               hash: String(tx.hash),
               transactionId: String(tx.transactionId),
               status: String(tx.status),
-            })),
-          )
+            }));
+          })
       : [];
 
     logger.info('Current pending transactions state:', {

@@ -1,4 +1,5 @@
 import { ethers, ContractTransactionResponse, BaseContract } from 'ethers';
+import { FlashbotsBundleProvider } from '@flashbots/ethers-provider-bundle';
 import { ConsoleLogger, Logger } from '@/monitor/logging';
 import { IExecutor } from '../interfaces/IExecutor';
 import {
@@ -8,6 +9,8 @@ import {
   QueueStats,
   TransactionReceipt,
   GovLstExecutorError,
+  BaseTransactionState,
+  FlashbotsTransactionRequest,
 } from '../interfaces/types';
 import { GovLstProfitabilityCheck } from '@/profitability/interfaces/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -29,6 +32,7 @@ import {
   pollForReceipt,
   validateTransaction,
   calculateQueueStats,
+  calculateGasLimit,
 } from '@/configuration/helpers';
 import {
   calculateGasParameters,
@@ -41,6 +45,13 @@ import { ErrorLogger } from '@/configuration/errorLogger';
 import { BASE_EVENTS, BASE_QUEUE } from './constants';
 import { SimulationService } from '@/simulation';
 import { SimulationTransaction } from '@/simulation/interfaces';
+import {
+  createFlashbotsProvider,
+  sendPrivateTransaction,
+  shouldUseFlashbots,
+  cleanupStaleFlashbotsTransactions,
+  getFlashbotsUserStats,
+} from './helpers/flashbots-helpers';
 
 // Extended executor config with error logger
 export interface ExtendedExecutorConfig extends ExecutorConfig {
@@ -99,6 +110,16 @@ export class BaseExecutor implements IExecutor {
   private readonly config: ExecutorConfig;
   private readonly gasCostEstimator: GasCostEstimator;
   private readonly simulationService: SimulationService | null;
+  
+  // Flashbots support
+  private flashbotsProvider: FlashbotsBundleProvider | null = null;
+  private flashbotsAuthSigner: ethers.Wallet | null = null;
+  
+  // Transaction state tracking (aligned with RelayerExecutor)
+  private pendingTransactions: Map<string, BaseTransactionState> = new Map();
+  private readonly TX_TIMEOUT = 60 * 60 * 1000; // 1 hour
+  private readonly CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
   /**
    * Creates a new BaseExecutor instance
@@ -174,6 +195,24 @@ export class BaseExecutor implements IExecutor {
     }
 
     this.gasCostEstimator = new GasCostEstimator();
+    
+    // Initialize Flashbots if enabled
+    this.initializeFlashbots().catch((error) => {
+      this.logger.warn('Failed to initialize Flashbots, continuing without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    
+    // Add cleanup interval for transaction state tracking
+    this.cleanupInterval = setInterval(() => {
+      cleanupStaleFlashbotsTransactions(
+        this.pendingTransactions,
+        this.TX_TIMEOUT,
+        this.flashbotsProvider,
+        this.logger,
+        this.errorLogger,
+      );
+    }, this.CLEANUP_INTERVAL);
   }
 
   /**
@@ -208,6 +247,12 @@ export class BaseExecutor implements IExecutor {
     try {
       this.isRunning = false;
       this.stopQueueProcessor();
+      
+      // Clear cleanup interval
+      if (this.cleanupInterval) {
+        clearInterval(this.cleanupInterval);
+        this.cleanupInterval = null;
+      }
     } catch (error) {
       this.logger.error('Failed to stop executor', { error });
       if (this.errorLogger) {
@@ -231,9 +276,16 @@ export class BaseExecutor implements IExecutor {
   }> {
     try {
       const balance = await this.getWalletBalance();
-      const pendingTxs = Array.from(this.queue.values()).filter(
+      // Count both queue-based pending transactions and tracked pending transactions
+      const queuePendingTxs = Array.from(this.queue.values()).filter(
         (tx) => tx.status === TransactionStatus.PENDING,
       ).length;
+      const trackedPendingTxs = Array.from(this.pendingTransactions.values()).filter(
+        (state) => state.status === 'pending' || state.status === 'submitted',
+      ).length;
+      
+      // Use the higher of the two counts (aligned with RelayerExecutor pattern)
+      const pendingTxs = Math.max(queuePendingTxs, trackedPendingTxs);
 
       return {
         isRunning: this.isRunning,
@@ -713,6 +765,62 @@ export class BaseExecutor implements IExecutor {
   }
 
   /**
+   * Initialize Flashbots provider if enabled in configuration
+   */
+  private async initializeFlashbots(): Promise<void> {
+    if (!this.config.flashbots?.enabled) {
+      this.logger.debug('Flashbots disabled in configuration');
+      return;
+    }
+
+    try {
+      // Create auth signer for Flashbots reputation
+      const authSigner = this.config.flashbots.authKey 
+        ? new ethers.Wallet(this.config.flashbots.authKey)
+        : ethers.Wallet.createRandom();
+
+      this.flashbotsAuthSigner = authSigner as ethers.Wallet;
+
+      this.flashbotsProvider = await createFlashbotsProvider(
+        this.provider,
+        this.flashbotsAuthSigner,
+        this.config,
+        this.logger,
+      );
+
+      if (this.flashbotsProvider && this.flashbotsAuthSigner) {
+        this.logger.info('Flashbots provider initialized successfully', {
+          authSigner: this.flashbotsAuthSigner.address,
+          relayUrl: this.config.flashbots.relayUrl,
+        });
+
+        // Get user stats for logging
+        const stats = await getFlashbotsUserStats(this.flashbotsProvider, this.logger);
+        if (stats) {
+          this.logger.info('Flashbots user reputation stats', stats);
+        }
+      }
+    } catch (error) {
+      this.logger.error('Failed to initialize Flashbots provider', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      
+      if (this.errorLogger) {
+        await this.errorLogger.error(
+          error instanceof Error ? error : new Error(String(error)),
+          {
+            context: 'base-executor-flashbots-init',
+          },
+        );
+      }
+      
+      // Continue without Flashbots
+      this.flashbotsProvider = null;
+      this.flashbotsAuthSigner = null;
+    }
+  }
+
+  /**
    * Gets the current wallet balance
    * @returns Wallet balance in wei
    */
@@ -858,28 +966,50 @@ export class BaseExecutor implements IExecutor {
     });
 
     try {
+      // Check for existing pending transaction first (aligned with RelayerExecutor)
+      const pendingTx = this.pendingTransactions.get(tx.id);
+      if (pendingTx) {
+        const now = Date.now();
+        if (now - pendingTx.submittedAt > this.TX_TIMEOUT) {
+          await cleanupStaleFlashbotsTransactions(
+            this.pendingTransactions,
+            this.TX_TIMEOUT,
+            this.flashbotsProvider,
+            this.logger,
+            this.errorLogger,
+          );
+        }
+        return; // Exit early if transaction is already pending
+      }
+
       tx.status = TransactionStatus.PENDING;
       this.queue.set(tx.id, tx);
 
       // Get payout amount from contract
       const payoutAmount = await this.govLstContract.payoutAmount();
-
-      // Temporarily use a default gas cost value
-      const gasCost = 0n; // Set to 0 for now since we don't have actual values
-      this.logger.info('Using default gas cost:', {
-        value: gasCost.toString(),
-        type: typeof gasCost,
-      });
-
-      // Calculate optimal threshold
-      const optimalThreshold = calculateOptimalThreshold(
-        payoutAmount,
-        gasCost,
-        this.config.minProfitMargin,
-        this.logger,
-      );
-
       const depositIds = tx.depositIds;
+
+      // Get the pre-calculated minExpectedReward threshold from profitability module
+      // This aligns with RelayerExecutor's approach
+      let finalThreshold: bigint;
+
+      if (tx.profitability.estimates.minExpectedReward) {
+        finalThreshold = tx.profitability.estimates.minExpectedReward;
+        this.logger.info('Using pre-calculated minimum expected reward', {
+          minExpectedReward: finalThreshold.toString(),
+          depositCount: depositIds.length,
+        });
+      } else {
+        // Fallback to a safe value if minExpectedReward is missing (should never happen)
+        this.logger.error(
+          'Missing minExpectedReward from profitability - using safe fallback',
+          {
+            depositCount: depositIds.length,
+          },
+        );
+        // Use payout + 20% as a safe fallback
+        finalThreshold = payoutAmount + (payoutAmount * 20n) / 100n;
+      }
 
       // Store queue-related metadata
       let queueItemId: string | undefined;
@@ -909,7 +1039,7 @@ export class BaseExecutor implements IExecutor {
             tx,
             depositIds,
             this.wallet.address,
-            optimalThreshold,
+            finalThreshold,
             tx.profitability.estimates.gas_estimate,
           );
 
@@ -1004,10 +1134,36 @@ export class BaseExecutor implements IExecutor {
         }
       }
 
-      // Calculate gas parameters
-      const gasEstimate = await this.estimateGas(depositIds, tx.profitability);
-      const { finalGasLimit, boostedGasPrice } =
-        await this.calculateGasParameters(gasEstimate);
+      // Calculate gas parameters aligned with RelayerExecutor approach
+      // Use simulation gas if available (already updated during simulation phase), otherwise fall back to contract estimation
+      let gasEstimate: bigint;
+      
+      // The gas estimate should already be updated from simulation if it ran successfully
+      // Check if we have a valid gas estimate from profitability (which includes simulation results)
+      if (tx.profitability.estimates.gas_estimate && tx.profitability.estimates.gas_estimate > 0n) {
+        gasEstimate = tx.profitability.estimates.gas_estimate;
+        this.logger.info('Using gas estimate from profitability (includes simulation)', {
+          gasEstimate: gasEstimate.toString(),
+          depositCount: depositIds.length,
+          source: this.simulationService ? 'simulation-enhanced' : 'profitability-only',
+        });
+      } else {
+        // Fall back to contract-based estimation
+        gasEstimate = await this.estimateGas(depositIds, tx.profitability);
+        this.logger.info('Using contract-based gas estimation fallback', {
+          gasEstimate: gasEstimate.toString(),
+          depositCount: depositIds.length,
+        });
+      }
+      
+      // Calculate gas limit using centralized helper
+      const finalGasLimit = calculateGasLimit(gasEstimate, depositIds.length, this.logger);
+      
+      // Determine if we should use Flashbots early to get proper gas parameters
+      const useFlashbots = shouldUseFlashbots(this.config, this.provider, this.logger);
+      
+      // Get network gas parameters (EIP-1559) with Flashbots compatibility
+      const { maxFeePerGas, maxPriorityFeePerGas } = await this.getGasParameters(useFlashbots);
 
       const claimAndDistributeReward = this.govLstContract
         .claimAndDistributeReward as GovLstContractMethod;
@@ -1015,15 +1171,110 @@ export class BaseExecutor implements IExecutor {
         throw new ContractMethodError('claimAndDistributeReward');
       }
 
-      const txResponse = await claimAndDistributeReward(
-        this.config.defaultTipReceiver || this.wallet.address,
-        optimalThreshold,
-        depositIds,
-        {
+      let txResponse: ethers.ContractTransactionResponse;
+
+      if (useFlashbots && this.flashbotsProvider && this.flashbotsAuthSigner) {
+        // Use Flashbots for transaction submission
+        this.logger.info('Submitting transaction via Flashbots', {
+          id: tx.id,
+          depositCount: depositIds.length,
+          threshold: finalThreshold.toString(),
+        });
+
+        // Create transaction request for Flashbots
+        const txRequest: FlashbotsTransactionRequest = {
+          to: this.govLstContract.target as string,
+          data: this.govLstContract.interface.encodeFunctionData('claimAndDistributeReward', [
+            this.config.defaultTipReceiver || this.wallet.address,
+            finalThreshold,
+            depositIds,
+          ]),
           gasLimit: finalGasLimit,
-          gasPrice: boostedGasPrice,
-        },
-      );
+          maxFeePerGas: maxFeePerGas || 0n,
+          maxPriorityFeePerGas: maxPriorityFeePerGas || 0n,
+          value: 0,
+          isFlashbots: true,
+          flashbotsOptions: {
+            maxBlockNumber: (await this.provider.getBlockNumber()) + (this.config.flashbots?.maxBlockNumber || 25),
+          },
+        };
+
+        // Track pending transaction
+        this.pendingTransactions.set(tx.id, {
+          id: tx.id,
+          hash: undefined,
+          submittedAt: Date.now(),
+          lastChecked: Date.now(),
+          retryCount: 0,
+          gasLimit: finalGasLimit,
+          maxFeePerGas: maxFeePerGas || 0n,
+          maxPriorityFeePerGas: maxPriorityFeePerGas || 0n,
+          status: 'pending',
+          isFlashbots: true,
+        });
+
+        // Submit via Flashbots
+        const flashbotsResult = await sendPrivateTransaction(
+          this.flashbotsProvider,
+          txRequest,
+          this.wallet,
+          this.config,
+          this.logger,
+        );
+
+        // Update transaction state with hash
+        const pendingState = this.pendingTransactions.get(tx.id);
+        if (pendingState) {
+          pendingState.hash = flashbotsResult.hash;
+          this.pendingTransactions.set(tx.id, pendingState);
+        }
+
+        // Create a mock response that matches the expected interface
+        txResponse = {
+          hash: flashbotsResult.hash,
+          wait: flashbotsResult.wait,
+          gasPrice: maxFeePerGas || 0n,
+          gasLimit: finalGasLimit,
+        } as ethers.ContractTransactionResponse;
+      } else {
+        // Use standard transaction submission
+        this.logger.info('Submitting transaction via standard mempool', {
+          id: tx.id,
+          depositCount: depositIds.length,
+          threshold: finalThreshold.toString(),
+        });
+
+        // Track pending transaction for standard submission too
+        this.pendingTransactions.set(tx.id, {
+          id: tx.id,
+          hash: undefined,
+          submittedAt: Date.now(),
+          lastChecked: Date.now(),
+          retryCount: 0,
+          gasLimit: finalGasLimit,
+          maxFeePerGas: maxFeePerGas || 0n,
+          maxPriorityFeePerGas: maxPriorityFeePerGas || 0n,
+          status: 'pending',
+          isFlashbots: false,
+        });
+
+        txResponse = await claimAndDistributeReward(
+          this.config.defaultTipReceiver || this.wallet.address,
+          finalThreshold,
+          depositIds,
+          {
+            gasLimit: finalGasLimit,
+            gasPrice: maxFeePerGas || 0n, // Use maxFeePerGas as fallback gasPrice for compatibility
+          },
+        );
+
+        // Update transaction state with hash
+        const pendingState = this.pendingTransactions.get(tx.id);
+        if (pendingState) {
+          pendingState.hash = txResponse.hash;
+          this.pendingTransactions.set(tx.id, pendingState);
+        }
+      }
 
       this.logger.info('Transaction submitted', {
         id: tx.id,
@@ -1164,20 +1415,99 @@ export class BaseExecutor implements IExecutor {
   }
 
   /**
-   * Calculates gas parameters for a transaction
-   * @param gasEstimate - Base gas estimate
-   * @returns Gas limit and price parameters
+   * Gets gas parameters from the network or configuration
+   * Aligned with RelayerExecutor's gas handling approach with Flashbots compatibility
    */
-  private async calculateGasParameters(gasEstimate: bigint): Promise<{
-    finalGasLimit: bigint;
-    boostedGasPrice: bigint;
+  private async getGasParameters(useFlashbots: boolean = false): Promise<{
+    maxFeePerGas: bigint | undefined;
+    maxPriorityFeePerGas: bigint | undefined;
   }> {
-    return calculateGasParameters(
-      this.provider,
-      gasEstimate,
-      this.config.gasBoostPercentage,
-      this.logger,
-    );
+    try {
+      // Get fee data from provider
+      const feeData = await this.provider.getFeeData();
+      let maxFeePerGas = feeData.maxFeePerGas
+        ? BigInt(feeData.maxFeePerGas.toString())
+        : undefined;
+      let maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+        ? BigInt(feeData.maxPriorityFeePerGas.toString())
+        : undefined;
+
+      // Apply slight boost to gas values for reliable inclusion
+      if (maxFeePerGas) {
+        maxFeePerGas = (maxFeePerGas * 125n) / 100n;
+      }
+
+      if (maxPriorityFeePerGas) {
+        maxPriorityFeePerGas = (maxPriorityFeePerGas * 125n) / 100n;
+      }
+
+      // Ensure Flashbots compatibility: priority fee must be > 0
+      if (useFlashbots) {
+        const minFlashbotsTip = BigInt(1000000000); // 1 gwei minimum for Flashbots
+        
+        if (!maxPriorityFeePerGas || maxPriorityFeePerGas === 0n) {
+          maxPriorityFeePerGas = minFlashbotsTip;
+          this.logger.info('Applied minimum Flashbots tip', {
+            minTip: maxPriorityFeePerGas.toString(),
+          });
+        } else if (maxPriorityFeePerGas < minFlashbotsTip) {
+          maxPriorityFeePerGas = minFlashbotsTip;
+          this.logger.info('Increased priority fee for Flashbots compatibility', {
+            adjustedTip: maxPriorityFeePerGas.toString(),
+          });
+        }
+
+        // Ensure maxFeePerGas covers the priority fee
+        if (!maxFeePerGas || maxFeePerGas < maxPriorityFeePerGas) {
+          const baseFee = feeData.maxFeePerGas 
+            ? BigInt(feeData.maxFeePerGas.toString()) - (feeData.maxPriorityFeePerGas ? BigInt(feeData.maxPriorityFeePerGas.toString()) : 0n)
+            : BigInt(20000000000); // 20 gwei fallback
+          maxFeePerGas = baseFee + maxPriorityFeePerGas;
+          this.logger.info('Adjusted maxFeePerGas for Flashbots', {
+            baseFee: baseFee.toString(),
+            priorityFee: maxPriorityFeePerGas.toString(),
+            totalMaxFee: maxFeePerGas.toString(),
+          });
+        }
+      }
+
+      // Use the higher of network fee data or configured values (from config if available)
+      const configuredMaxFeePerGas = this.config.gasPolicy?.maxFeePerGas;
+      const configuredMaxPriorityFeePerGas = this.config.gasPolicy?.maxPriorityFeePerGas;
+
+      const finalMaxFeePerGas =
+        configuredMaxFeePerGas && maxFeePerGas
+          ? maxFeePerGas > configuredMaxFeePerGas
+            ? maxFeePerGas
+            : configuredMaxFeePerGas
+          : configuredMaxFeePerGas || maxFeePerGas;
+
+      const finalMaxPriorityFeePerGas =
+        configuredMaxPriorityFeePerGas && maxPriorityFeePerGas
+          ? maxPriorityFeePerGas > configuredMaxPriorityFeePerGas
+            ? maxPriorityFeePerGas
+            : configuredMaxPriorityFeePerGas
+          : configuredMaxPriorityFeePerGas || maxPriorityFeePerGas;
+
+      this.logger.info('Gas parameters calculated', {
+        maxFeePerGas: finalMaxFeePerGas?.toString() || 'undefined',
+        maxPriorityFeePerGas:
+          finalMaxPriorityFeePerGas?.toString() || 'undefined',
+        useFlashbots,
+        flashbotsCompatible: useFlashbots ? (finalMaxPriorityFeePerGas && finalMaxPriorityFeePerGas > 0n) : 'N/A',
+      });
+
+      return {
+        maxFeePerGas: finalMaxFeePerGas,
+        maxPriorityFeePerGas: finalMaxPriorityFeePerGas,
+      };
+    } catch (error) {
+      this.logger.error('Failed to get gas parameters', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Return undefined values, transaction will use network defaults
+      return { maxFeePerGas: undefined, maxPriorityFeePerGas: undefined };
+    }
   }
 
   /**
@@ -1258,6 +1588,9 @@ export class BaseExecutor implements IExecutor {
       );
       this.queue.set(tx.id, tx);
       this.queue.delete(tx.id);
+      
+      // Clean up pending transaction state (aligned with RelayerExecutor)
+      this.pendingTransactions.delete(tx.id);
 
       // Check if we need to swap tokens for ETH after transaction
       await this.checkAndSwapTokensIfNeeded();
@@ -1319,6 +1652,9 @@ export class BaseExecutor implements IExecutor {
 
     // Remove from in-memory queue
     this.queue.delete(tx.id);
+    
+    // Clean up pending transaction state (aligned with RelayerExecutor)
+    this.pendingTransactions.delete(tx.id);
 
     // Check if we need to swap tokens for ETH even after failure
     await this.checkAndSwapTokensIfNeeded();

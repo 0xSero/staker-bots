@@ -205,6 +205,14 @@ export const EXECUTOR = {
     defaultTipReceiver: '',
     minProfitMargin: 10,
     staleTransactionThresholdMinutes: 5, // Clean up stale transactions after 5 minutes
+    // Flashbots configuration
+    flashbots: {
+      enabled: false, // Disabled by default
+      authKey: '', // Optional auth key for reputation
+      relayUrl: 'https://relay.flashbots.net', // Default mainnet relay
+      mode: 'fast', // Use fast mode by default
+      maxBlockNumber: 25, // Wait up to 25 blocks
+    },
   } as ExecutorConfig,
 
   DEFAULT_RELAYER_CONFIG: {

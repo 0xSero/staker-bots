@@ -54,6 +54,10 @@ export interface ExecutorConfig {
     minBalance: bigint;
     maxPendingTransactions: number;
   };
+  gasPolicy?: {
+    maxFeePerGas?: bigint;
+    maxPriorityFeePerGas?: bigint;
+  };
   maxQueueSize: number;
   minConfirmations: number;
   maxRetries: number;
@@ -64,6 +68,14 @@ export interface ExecutorConfig {
   defaultTipReceiver: string;
   minProfitMargin: number;
   staleTransactionThresholdMinutes?: number;
+  // Flashbots configuration
+  flashbots?: {
+    enabled: boolean;
+    authKey?: string; // Optional auth key for Flashbots reputation
+    relayUrl?: string; // Custom relay URL
+    mode?: 'normal' | 'fast'; // Transaction mode
+    maxBlockNumber?: number; // Max blocks to wait
+  };
 }
 
 export interface RelayerExecutorConfig {
@@ -214,4 +226,33 @@ export interface RelayerTransactionState {
   maxFeePerGas: bigint;
   maxPriorityFeePerGas: bigint;
   status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+}
+
+// Add similar transaction state for BaseExecutor
+export interface BaseTransactionState {
+  id: string;
+  hash?: string;
+  submittedAt: number;
+  lastChecked: number;
+  retryCount: number;
+  gasLimit: bigint;
+  gasPrice?: bigint;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+  status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+  isFlashbots?: boolean;
+}
+
+// Flashbots transaction options
+export interface FlashbotsTransactionOptions {
+  maxBlockNumber?: number;
+  minTimestamp?: number;
+  maxTimestamp?: number;
+  revertingTxHashes?: string[];
+}
+
+// Enhanced transaction request for Flashbots
+export interface FlashbotsTransactionRequest extends ethers.TransactionRequest {
+  isFlashbots?: boolean;
+  flashbotsOptions?: FlashbotsTransactionOptions;
 }

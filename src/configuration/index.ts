@@ -49,6 +49,10 @@ export const CONFIG = {
     healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '60'),
   },
   executor: {
+    flashbots: {
+      maxBlockNumber: parseInt(process.env.FLASHBOTS_MAX_BLOCK_NUMBER || '25'),
+      authKey: process.env.FLASHBOTS_AUTH_PRIVATE_KEY || '',
+    },
     minGasCost: process.env.MIN_GAS_COST || '20.0',
     maxGasCost: process.env.MAX_GAS_COST || '450.0',
     avgGasCost: process.env.AVG_GAS_COST || '200.0',
